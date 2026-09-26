@@ -1,0 +1,21 @@
+[project]
+name = "hermes-model-switch"
+version = "0.1.0"
+description = "Let the agent switch its own session's model mid-turn, on the user's explicit request."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-model-switch = "hermes_model_switch"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["hermes_model_switch"]
+
+[tool.setuptools.package-dir]
+hermes_model_switch = "plugin/modelctl"
