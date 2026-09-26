@@ -152,25 +152,86 @@ def _current_session_key() -> str:
         return os.environ.get("HERMES_SESSION_KEY", "") or ""
 
 
+# ── durable ledger ──
+# A recorded request is a fact about a turn that is ALREADY RUNNING, not transient process state.
+# `hermes plugins update` / the control-socket `reload-plugins` verb re-import this module in-place,
+# and a gateway restart does the same across processes — either one drops an in-memory dict and the
+# tool then refuses a switch the user plainly asked for (observed: a hot reload between the hook and
+# the tool call). So the ledger is file-backed under HERMES_HOME/state, not a module global.
+# Security posture is unchanged: the file is only ever written from a user message that already
+# matched a switch phrase, is per-session-key, single-use, and TTL-bounded, and it never contains
+# credentials (only model ids and a boolean).
+
+def _ledger_path() -> str:
+    home = os.environ.get("HERMES_HOME") or "~/.hermes"
+    return os.path.join(home, "state", "modelctl-requests.json")
+
+
+def _load_ledger() -> Dict[str, Dict[str, Any]]:
+    try:
+        with open(_ledger_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_ledger(ledger: Dict[str, Dict[str, Any]]) -> None:
+    path = _ledger_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(ledger, fh)
+        os.replace(tmp, path)  # atomic: a concurrent tool call never reads a half-written file
+    except Exception as exc:
+        logger.debug("modelctl: could not persist request ledger: %s", exc)
+
+
 def _remember_request(session_key: str, request: Dict[str, Any]) -> None:
     now = time.time()
     with _state_lock:
         _expire_locked(now)
-        if session_key:
-            _pending_requests[session_key] = {
-                "request": request,
-                "expires": now + _REQUEST_TTL_SECONDS,
-                "at": now,
-            }
+        if not session_key:
+            return
+        entry = {"request": request, "expires": now + _REQUEST_TTL_SECONDS, "at": now}
+        _pending_requests[session_key] = entry
+        ledger = _load_ledger()
+        ledger[session_key] = entry
+        _save_ledger(ledger)
 
 
 def _take_request(session_key: str) -> Optional[Dict[str, Any]]:
-    """Consume the request recorded for *session_key* (single use, TTL-bounded)."""
+    """Consume the request recorded for *session_key* (single use, TTL-bounded).
+
+    Reads the durable ledger and removes the key in the same pass, so a reload between the hook and
+    the tool call does not lose the authorization. The TTL is re-checked here for the durable copy
+    too: ``_expire_locked`` only prunes the in-memory map, so trusting the durable entry blindly
+    would resurrect a request whose TTL had already passed.
+    """
     now = time.time()
     with _state_lock:
         _expire_locked(now)
         entry = _pending_requests.pop(session_key, None)
+        ledger = _load_ledger()
+        durable = ledger.pop(session_key, None)
+        _save_ledger(ledger)
+    if durable is not None and float(durable.get("expires", 0.0)) > now:
+        return dict(durable.get("request") or {})
     return dict(entry.get("request") or {}) if entry is not None else None
+
+
+def _hydrate_from_ledger() -> None:
+    """Reload unexpired records so a re-imported module can still honor earlier requests."""
+    now = time.time()
+    with _state_lock:
+        ledger = _load_ledger()
+        for key, entry in ledger.items():
+            try:
+                if float(entry.get("expires", 0.0)) > now and key not in _pending_requests:
+                    _pending_requests[key] = entry
+            except Exception:
+                continue
 
 
 def _expire_locked(now: float) -> None:
@@ -230,6 +291,27 @@ _SWITCH_SCHEMA = {
 
 def _error(message: str) -> Dict[str, Any]:
     return {"error": message}
+
+
+def _tool_result(payload: Dict[str, Any]) -> str:
+    """Serialize a tool result for the registry.
+
+    ``ToolRegistry.dispatch`` accepts ONLY a string (or the multimodal envelope) and turns anything
+    else into ``tool_result_contract`` — a plain dict is rejected (#see registry._normalize_handler_result).
+    So the registered handler returns JSON text; ``modelctl()`` below stays dict-shaped for tests and
+    for any in-process caller.
+    """
+    import json
+
+    try:
+        return json.dumps(payload, indent=2, default=str)
+    except Exception:
+        return json.dumps({"error": "modelctl result could not be serialized"})
+
+
+def _modelctl_tool(args: Dict[str, Any], **kwargs: Any) -> str:
+    """Registry-facing entry point: the tool contract, not the internal API."""
+    return _tool_result(modelctl(args, **kwargs))
 
 
 def modelctl(args: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
@@ -577,14 +659,15 @@ def _normalized_source(gateway: Any, source: Any) -> Any:
 # Registration
 # ──────────────────────────────────────────────────────────────────────────────
 
-def register(ctx) -> None:
+def register(ctx):
     """Plugin entry point: register the tool and the request-recording hook."""
     try:
+        _hydrate_from_ledger()  # honor requests recorded before a reload/restart
         ctx.register_tool(
             name=TOOL_NAME,
             toolset=TOOLSET,
             schema=_SWITCH_SCHEMA,
-            handler=modelctl,
+            handler=_modelctl_tool,
             description=(
                 "Switch this session's model on the user's explicit request, list reachable models, "
                 "or report the current route. Refuses without a recorded user request."

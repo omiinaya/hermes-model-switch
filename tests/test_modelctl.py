@@ -5,7 +5,11 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -80,13 +84,65 @@ class ParseSwitchRequestTests(unittest.TestCase):
         self.assertEqual(self._model("switch to anthropic/claude-sonnet-5"), "anthropic/claude-sonnet-5")
 
 
+class ToolContractTests(unittest.TestCase):
+    """The REGISTRY contract, not just the internal API.
+
+    ``ToolRegistry.dispatch`` accepts only a string (or the multimodal envelope); a dict return is
+    replaced with a ``tool_result_contract`` error. The tool then looks registered but answers with
+    an error instead of working, and only a real dispatch catches it.
+    """
+
+    def test_registered_handler_returns_a_string(self):
+        import json
+
+        raw = modelctl._modelctl_tool({"action": "status"})
+        self.assertIsInstance(raw, str)
+        self.assertIn("error", json.loads(raw))  # no live gateway in a bare test process
+
+    def test_modelctl_stays_dict_shaped_for_in_process_callers(self):
+        self.assertIsInstance(modelctl.modelctl({"action": "status"}), dict)
+
+    def test_every_action_reaches_the_contract(self):
+        import json
+
+        for action in ("switch", "list", "status", "bogus"):
+            payload = json.loads(modelctl._modelctl_tool({"action": action, "model": "x"}))
+            self.assertIsInstance(payload, dict, action)
+            self.assertTrue(payload, action)
+
+    def test_dispatch_through_the_real_registry(self):
+        import sys
+
+        from tools.registry import discover_builtin_tools, registry
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
+        discover_builtin_tools()
+        registry.register(
+            name=modelctl.TOOL_NAME, toolset=modelctl.TOOLSET, schema=modelctl._SWITCH_SCHEMA,
+            handler=modelctl._modelctl_tool, description="t", emoji="x", override=True,
+        )
+        out = registry.dispatch(modelctl.TOOL_NAME, {"action": "status"})
+        # A contract failure would come back as a tool_result_contract error, not our refusal.
+        self.assertNotIn("tool_result_contract", str(out))
+
+
 class RequestLedgerTests(unittest.TestCase):
     """The per-session request ledger: single-use, TTL-bounded, keyed."""
 
     def setUp(self):
+        # Point HERMES_HOME at a scratch dir so the DURABLE ledger never touches real gateway state.
+        self._tmpdir = tempfile.mkdtemp(prefix="modelctl-test-")
+        self._saved_home = os.environ.get("HERMES_HOME")
+        os.environ["HERMES_HOME"] = self._tmpdir
+        self.addCleanup(self._restore)
         modelctl._pending_requests.clear()
 
-    def tearDown(self):
+    def _restore(self):
+        if self._saved_home is None:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = self._saved_home
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
         modelctl._pending_requests.clear()
 
     def test_record_and_take(self):
@@ -102,14 +158,51 @@ class RequestLedgerTests(unittest.TestCase):
         self.assertIsNotNone(modelctl._take_request("s1"))
 
     def test_expiry(self):
+        # Two independent copies (memory + ledger), so a real expiry means BOTH are past due.
         modelctl._remember_request("s1", {"action": "switch", "model": "m1"})
-        entry = modelctl._pending_requests["s1"]
-        entry["expires"] = 0.0
+        modelctl._pending_requests["s1"]["expires"] = 0.0
+        ledger = modelctl._load_ledger()
+        ledger["s1"]["expires"] = 0.0
+        modelctl._save_ledger(ledger)
+        self.assertIsNone(modelctl._take_request("s1"))
+
+    def test_expired_durable_entry_is_not_honored(self):
+        # The ledger copy is written independently of the in-memory one, so it has its own TTL and
+        # must be pruned independently — an expired ledger row must not authorize a switch.
+        modelctl._remember_request("s1", {"action": "switch", "model": "m1"})
+        ledger = modelctl._load_ledger()
+        ledger["s1"]["expires"] = 0.0
+        modelctl._save_ledger(ledger)
+        modelctl._pending_requests.clear()
+        modelctl._hydrate_from_ledger()
         self.assertIsNone(modelctl._take_request("s1"))
 
     def test_empty_session_key_not_stored(self):
+        # An empty key must record nothing anywhere — it is the "no session" case, and a
+        # session-less record could never be matched to a turn.
         modelctl._remember_request("", {"action": "switch", "model": "m1"})
-        self.assertEqual(modelctl._pending_requests, {})
+        self.assertNotIn("", modelctl._pending_requests)
+        self.assertEqual(modelctl._load_ledger(), {})
+
+    def test_survives_module_reload(self):
+        # A plugin hot-reload / gateway restart re-imports this module, dropping module globals.
+        # A request recorded for a turn that is already running must not be lost by that.
+        modelctl._remember_request("s1", {"action": "switch", "model": "m1"})
+        modelctl._pending_requests.clear()  # simulate the re-import
+        modelctl._hydrate_from_ledger()
+        self.assertIsNotNone(modelctl._take_request("s1"))
+
+    def test_take_removes_the_durable_copy(self):
+        modelctl._remember_request("s1", {"action": "switch", "model": "m1"})
+        self.assertIsNotNone(modelctl._take_request("s1"))
+        self.assertIsNone(modelctl._take_request("s1"))
+        self.assertNotIn("s1", modelctl._load_ledger())
+
+    def test_durable_ledger_holds_no_credentials(self):
+        modelctl._remember_request("s1", {"action": "switch", "model": "m1", "global": True})
+        blob = json.dumps(modelctl._load_ledger())
+        for secret_word in ("api_key", "token", "secret", "password"):
+            self.assertNotIn(secret_word, blob)
 
 
 class AuthorizationTests(unittest.TestCase):
