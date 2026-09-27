@@ -1,6 +1,6 @@
 [project]
 name = "hermes-model-switch"
-version = "0.1.0"
+version = "0.2.0"
 description = "Let the agent switch its own session's model mid-turn, on the user's explicit request."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -17,5 +17,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 packages = ["hermes_model_switch"]
 
+# The plugin layout is FLAT (plugin.yaml + __init__.py at the repo root) so that
+# `hermes plugins install owner/repo` finds the manifest without a subdirectory argument.
+# `hermes plugins install owner/repo/plugin` is the alternative and is still supported,
+# but it is a worse default: it produces a "may not be a valid plugin" warning.
 [tool.setuptools.package-dir]
-hermes_model_switch = "plugin/modelctl"
+hermes_model_switch = "modelctl"

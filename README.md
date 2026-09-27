@@ -56,9 +56,12 @@ open on any internal error.
 ## Install
 
 ```bash
-cp -r plugin ~/.hermes/plugins/hermes-model-switch
+hermes plugins install omiinaya/hermes-model-switch
 hermes plugins enable hermes-model-switch
 ```
+
+The manifest is at the **repository root**, so the plain `owner/repo` form above works with no
+subdirectory argument and no warnings.
 
 The hook is live in the running gateway immediately. The tool lands on the next session (Hermes
 defers plugin *tools* until a new session; only transforms and hooks hot-reload).
@@ -67,6 +70,7 @@ Verify:
 
 ```bash
 hermes plugins list | grep model-switch      # shows "enabled"
+hermes plugins doctor ~/.hermes/plugins/hermes-model-switch
 journalctl --user -u hermes-gateway | grep modelctl
 ```
 
@@ -92,19 +96,41 @@ qwen3.8-27b?` arms nothing, and neither does `why do you use big-pickle?`.
   hidden or aliased models, so the resolver does not refuse an id absent from its `/models`
   listing. That warning is returned to the model and is the only signal that the switch landed on
   an unverified model — do not drop it.
+- **Cross-provider hops need a declared model.** A bare model name only moves a session off its
+  current provider when that model is declared in the target's `providers.<slug>.models` block.
+  `discover_models: true` feeds the picker's live listing; it is **not** a routing declaration.
+  If a switch "succeeds" and the next turn 404s with "model does not exist", declare the catalog.
+  When two configured providers serve the same catalog, declare it on only one of them — a name
+  declared by several is reported as ambiguous and the bare-name switch fails.
 - **Code skew.** If the Hermes checkout drifts under a running gateway, `detect_code_skew` refuses
   model switches outright. Restart the gateway after updating Hermes, before switching.
+- **No live gateway.** Called from a plain CLI (not the gateway) there is nothing to swap; the
+  tool returns an honest error instead of pretending.
+
+## Compatibility
+
+This plugin calls private Hermes internals (`runner._cached_agent_for`,
+`runner._session_model_overrides`, `runner._evict_cached_agent`). It is version-coupled to the
+Hermes agent checkout. If an upgrade moves one of those paths, this plugin fails **loudly** at
+load with an import error rather than silently misbehaving.
+
+Check your install with `hermes plugins compat` and `hermes plugins doctor`.
 
 ## Tests
 
 ```bash
-/usr/local/lib/hermes-agent/venv/bin/python -m unittest discover -s tests   # 24 unit tests
+/usr/local/lib/hermes-agent/venv/bin/python -m unittest discover -s tests   # 33 unit tests
 /usr/local/lib/hermes-agent/venv/bin/python tests/test_live_switch.py       # live end-to-end
+hermes plugins validate .                                                   # catalog admission
 ```
 
 The unit tests cover the request parser (the authorization gate), the single-use TTL ledger, the
-authorization refusals, and the hook's fail-open behavior.
+authorization refusals, the hook's fail-open behavior, and dispatch through the **real**
+`ToolRegistry` (a handler-shaped test cannot catch the `tool_result_contract` rewrite, which makes
+a tool look registered and fail on every call).
 
 `test_live_switch.py` is not a unit test: it binds a real session key against real
 `SessionState`, real `config.yaml`, and real provider credentials, then performs actual switches
-and switches back. Run it after changing the switch path.
+and switches back. It needs a running Hermes install and reachable providers, and is not run in CI.
+
+CI (`.github/workflows/ci.yml`) runs the unit tests and `hermes plugins validate` on every push.

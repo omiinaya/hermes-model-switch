@@ -58,9 +58,9 @@ _pending_requests: Dict[str, Dict[str, Any]] = {}
 # Request parsing — turn the operator's own words into a switch request
 # ──────────────────────────────────────────────────────────────────────────────
 
-# "switch to X", "use X", "go to X", "run on X", "switch model to X", "model -> X"
+# "switch to X", "switch back to X", "use X", "go to X", "run on X", "switch model to X", "model -> X"
 _SWITCH_RE = re.compile(
-    r"\b(?:switch(?:\s+model)?\s+to|use|go\s+to|run\s+on|move\s+to|model\s*(?:->|=|:)\s*)"
+    r"\b(?:switch(?:\s+model)?\s+(?:back\s+)?to|use|go\s+to|run\s+on|move\s+to|model\s*(?:->|=|:)\s*)"
     r"[\s]*[`'\"]*"
     r"(?P<model>[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,120})",
     re.IGNORECASE,

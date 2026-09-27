@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "plugin"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import modelctl  # noqa: E402
 
@@ -27,6 +27,15 @@ class ParseSwitchRequestTests(unittest.TestCase):
 
     def _model(self, text):
         return (modelctl.parse_switch_request(text) or {}).get("model")
+
+    def test_switch_back_to_model(self):
+        # Regression: the first live switch-back attempt ("switch back to big-pickle") was
+        # unparsed, so the tool refused a genuine user request.
+        parsed = modelctl.parse_switch_request("switch back to big-pickle")
+        self.assertEqual(parsed["action"], "switch")
+        self.assertEqual(parsed["model"], "big-pickle")
+        parsed = modelctl.parse_switch_request("now switch back to big-pickle love")
+        self.assertEqual(parsed["model"], "big-pickle")
 
     def test_switch_to_model(self):
         parsed = modelctl.parse_switch_request("switch to qwen3.8-27b")
@@ -111,11 +120,19 @@ class ToolContractTests(unittest.TestCase):
             self.assertTrue(payload, action)
 
     def test_dispatch_through_the_real_registry(self):
+        import importlib.util
         import sys
 
+        # This is the ONLY test that crosses the real ToolRegistry boundary, and the only one
+        # that needs the Hermes agent on sys.path. Skip cleanly (rather than error) when it is
+        # absent, so the suite runs on a bare Python in CI. It is NOT optional coverage: a
+        # handler-shaped test cannot catch the `tool_result_contract` rewrite that makes a tool
+        # look registered while failing on every call.
+        if importlib.util.find_spec("tools") is None:
+            self.skipTest("Hermes agent not importable (tools.registry missing); registry dispatch untested")
         from tools.registry import discover_builtin_tools, registry
 
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugin"))
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         discover_builtin_tools()
         registry.register(
             name=modelctl.TOOL_NAME, toolset=modelctl.TOOLSET, schema=modelctl._SWITCH_SCHEMA,

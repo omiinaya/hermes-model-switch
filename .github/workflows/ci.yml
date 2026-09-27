@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: unit tests + catalog validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      # The plugin has no pip dependencies, but `register()` imports
+      # `hermes_cli.model_switch` lazily inside the handler, so nothing Hermes-owned is needed
+      # for the unit suite. `hermes plugins validate` is the catalog-admission gate: it proves the
+      # manifest's provides_tools/provides_hooks match what register() actually installs.
+      #
+      # If a future change makes the import eager, install the agent first:
+      #   pip install hermes-agent
+      - name: Catalog validation
+        run: |
+          if command -v hermes >/dev/null 2>&1; then
+            hermes plugins validate .
+          else
+            echo "::warning::hermes CLI not installed; skipping catalog validation"
+          fi
