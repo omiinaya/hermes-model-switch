@@ -17,13 +17,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ.setdefault("HERMES_HOME", "~/.hermes")
+# The live harness needs a REAL Hermes install: real config.yaml, real provider credentials.
+# Resolve it the way Hermes itself does (env first, then the standard per-user location) rather
+# than hardcoding one machine's path. An empty scratch home would silently pass nothing.
+os.environ.setdefault("HERMES_HOME", str(Path.home() / ".hermes"))
 
 import modelctl  # noqa: E402
 
 
 @dataclasses.dataclass
 class _Source:
+    """Synthetic inbound event. Identity values are deliberately generic so nothing about the
+    operator's real Matrix deployment is embedded in a public repository."""
+
     platform: str = "matrix"
     chat_id: str = "!testroom:example.invalid"
     chat_type: str = "dm"

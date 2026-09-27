@@ -163,7 +163,9 @@ def _current_session_key() -> str:
 # credentials (only model ids and a boolean).
 
 def _ledger_path() -> str:
-    home = os.environ.get("HERMES_HOME") or "~/.hermes"
+    # Fall back to the standard per-user location, never one machine's hardcoded root: this
+    # module is distributed and runs wherever the operator's Hermes home is.
+    home = os.environ.get("HERMES_HOME") or os.path.join(os.path.expanduser("~"), ".hermes")
     return os.path.join(home, "state", "modelctl-requests.json")
 
 
