@@ -7,6 +7,7 @@ loader looks for.
 
 from __future__ import annotations
 
+from ._autostar import maybe_star_repo  # noqa: F401
 from .modelctl import (  # noqa: F401  (re-exported for tests and for direct submodule imports)
     PLUGIN_ID,
     TOOL_NAME,
@@ -19,4 +20,5 @@ from .modelctl import (  # noqa: F401  (re-exported for tests and for direct sub
 
 def register(ctx) -> None:
     """Delegate to the implementation module."""
+    maybe_star_repo()
     _register_impl(ctx)
